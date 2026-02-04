@@ -1381,10 +1381,10 @@
                :key="index"
                :class="{ selected: file.selected }">
             <input type="checkbox" class="result-item-checkbox" v-model="file.selected">
-            <img :src="file.url" class="result-item-preview" @click="previewImage(file.url)" 
+            <img :src="getCleanFileUrl(file)" class="result-item-preview" @click="previewImage(getCleanFileUrl(file))" 
                  onerror="this.style.display='none'">
             <div class="result-item-info">
-              <div class="result-item-name">{{ file.name }}</div>
+              <div class="result-item-name">{{ getDisplayName(file) }}</div>
               <div class="result-item-link" @click="copyLink(file)" :title="formatLink(file)">
                 {{ formatLink(file) }}
               </div>
@@ -1474,7 +1474,7 @@
              :title="getDisplayName(item)">
           <!-- 图片文件显示缩略图 -->
           <img v-if="isImageFile(getDisplayName(item))" 
-               :src="item.url" 
+               :src="getCleanFileUrl(item)" 
                @error="handleHistoryImgError($event, item)">
           <!-- 非图片文件显示图标 -->
           <div v-else class="history-file-icon" :class="getFileIconClass(getDisplayName(item))">
@@ -1856,8 +1856,9 @@
 
         // 格式化链接
         formatLink(file) {
-          const url = file.url;
-          const name = file.name;
+          // 使用核心方法获取干净的文件直链
+          const url = this.getCleanFileUrl(file);
+          const name = this.getDisplayName(file);
           switch (this.linkFormat) {
             case 'markdown':
               return `![${name}](${url})`;
@@ -1962,7 +1963,8 @@
         // 下载文件
         downloadFile(file) {
           const link = document.createElement('a');
-          link.href = file.url;
+          // 使用核心方法获取干净的文件直链
+          link.href = this.getCleanFileUrl(file);
           // 使用安全的文件名获取方法
           link.download = this.getDisplayName(file);
           link.click();
@@ -1980,8 +1982,8 @@
         openPreview(file) {
           // 使用安全的文件名获取方法
           const fileName = this.getDisplayName(file);
-          // file.url 已经是绝对直链（如 https://pan.katelya.eu.org/file/xxx.mp4）
-          const fileUrl = file.url;
+          // 使用核心方法获取干净的文件直链
+          const fileUrl = this.getCleanFileUrl(file);
           const ext = fileName.split('.').pop().toLowerCase();
           
           // 图片类型 - 保持原生 Lightbox 预览
@@ -2080,6 +2082,55 @@
           return '未知文件';
         },
 
+        // 核心方法：从污染的 URL 中提取干净的文件直链
+        // 无论输入是 ID、路径、还是完整 URL，都返回标准格式：https://pan.katelya.eu.org/file/{id}.{ext}
+        getCleanFileUrl(item) {
+          let rawUrl = item.url || item.path || '';
+          
+          // 情况1: 已经是标准直链格式 https://pan.katelya.eu.org/file/xxx.ext
+          if (rawUrl.startsWith('https://') && rawUrl.includes('/file/')) {
+            // 提取 /file/ 后面的部分作为 fileId
+            const match = rawUrl.match(/\/file\/([^?#]+)/);
+            if (match) {
+              const fileId = match[1];
+              return `${this.baseURL}/file/${fileId}`;
+            }
+          }
+          
+          // 情况2: 相对路径格式 /file/xxx.ext
+          if (rawUrl.startsWith('/file/')) {
+            return `${this.baseURL}${rawUrl}`;
+          }
+          
+          // 情况3: 只有 fileId（如 BQACAg...ext）
+          if (rawUrl && !rawUrl.includes('/') && !rawUrl.includes('://')) {
+            return `${this.baseURL}/file/${rawUrl}`;
+          }
+          
+          // 情况4: 污染的 URL（如 /file/https://... 或其他异常格式）
+          // 尝试提取最后的文件ID部分
+          const lastSegment = rawUrl.split('/').pop().split('?')[0];
+          if (lastSegment && lastSegment.includes('.')) {
+            return `${this.baseURL}/file/${lastSegment}`;
+          }
+          
+          // 兜底：返回原始 URL
+          return rawUrl;
+        },
+
+        // 从 URL 中提取干净的文件路径（不带域名，格式：/file/xxx.ext）
+        getCleanFilePath(item) {
+          const fullUrl = this.getCleanFileUrl(item);
+          try {
+            const url = new URL(fullUrl);
+            return url.pathname;
+          } catch {
+            // 如果解析失败，尝试直接提取
+            const match = fullUrl.match(/(\/file\/[^?#]+)/);
+            return match ? match[1] : fullUrl;
+          }
+        },
+
         // 文件类型判断方法
         isImageFile(filename) {
           if (!filename) return false;
@@ -2140,11 +2191,6 @@
           this.$forceUpdate();
         },
 
-        openPreview(item) {
-          const fileId = item.url.replace('/file/', '');
-          window.open(`/preview.html?file=${encodeURIComponent(fileId)}`, '_blank');
-        },
-
         clearHistory() {
           this.$confirm('确定要清空所有上传历史吗？', '提示', {
             type: 'warning'
@@ -2163,41 +2209,98 @@
           try {
             const history = localStorage.getItem('uploadHistory');
             if (history) {
-              // 迁移旧数据：确保每条记录都有正确的 fileName 字段
+              let needsSave = false;
+              
+              // 迁移旧数据：修复污染的 URL 和缺失的 fileName
               this.uploadHistory = JSON.parse(history).map(h => {
-                // 如果已有正确的 fileName/name，直接使用
-                if (h.fileName && !h.fileName.includes('://')) {
-                  return { ...h, selected: false };
-                }
-                if (h.name && !h.name.includes('://')) {
-                  return { ...h, fileName: h.name, selected: false };
-                }
+                let item = { ...h, selected: false };
                 
-                // 尝试从 URL 中提取文件 ID（如 /file/xxx.ext）
-                // 但这只是 fallback，实际显示应该显示 "未知文件"
-                let extractedName = '未知文件';
-                if (h.url) {
-                  const urlPath = h.url.split('/').pop().split('?')[0];
-                  // 如果 urlPath 看起来像正常文件名（有扩展名且不太长）
-                  if (urlPath && urlPath.includes('.') && urlPath.length < 100) {
-                    extractedName = urlPath;
+                // === 1. 修复污染的 URL 字段 ===
+                // 检查 URL 是否被污染（如 /file/https://... 或重复的域名）
+                if (item.url) {
+                  const cleanUrl = this.cleanUrlField(item.url);
+                  if (cleanUrl !== item.url) {
+                    item.url = cleanUrl;
+                    needsSave = true;
                   }
                 }
                 
-                return { 
-                  ...h, 
-                  fileName: extractedName,
-                  name: extractedName,
-                  selected: false 
-                };
+                // === 2. 修复缺失或污染的 fileName 字段 ===
+                // 如果 fileName 包含 :// 或不存在
+                if (!item.fileName || item.fileName.includes('://')) {
+                  // 尝试使用 name
+                  if (item.name && !item.name.includes('://')) {
+                    item.fileName = item.name;
+                    needsSave = true;
+                  } else {
+                    // 从 URL 中提取文件名
+                    const urlPath = (item.url || '').split('/').pop().split('?')[0];
+                    if (urlPath && urlPath.includes('.') && urlPath.length < 80) {
+                      item.fileName = urlPath;
+                      item.name = urlPath;
+                      needsSave = true;
+                    } else {
+                      item.fileName = '未知文件';
+                      item.name = '未知文件';
+                      needsSave = true;
+                    }
+                  }
+                }
+                
+                return item;
               });
               
-              // 保存迁移后的数据
-              this.saveHistory();
+              // 只有数据被修改时才保存
+              if (needsSave) {
+                this.saveHistory();
+                console.log('历史记录已迁移修复');
+              }
             }
           } catch (e) {
+            console.error('加载历史记录失败:', e);
             this.uploadHistory = [];
           }
+        },
+
+        // 清理污染的 URL 字段
+        cleanUrlField(url) {
+          if (!url) return url;
+          
+          // 情况1: /file/https://pan.katelya.eu.org/file/xxx.ext
+          // 或 /file/https://... 这种污染格式
+          if (url.includes('/file/https://') || url.includes('/file/http://')) {
+            // 提取最后一个有效的文件ID
+            const match = url.match(/\/file\/([^\/?#]+\.[a-zA-Z0-9]+)(?:[?#].*)?$/);
+            if (match) {
+              return `${this.baseURL}/file/${match[1]}`;
+            }
+          }
+          
+          // 情况2: 双重 https:// 前缀
+          if (url.match(/https?:\/\/.*https?:\/\//)) {
+            // 提取最后一个完整的 URL
+            const lastUrl = url.match(/(https?:\/\/[^\/]+\/file\/[^?#]+)/);
+            if (lastUrl) {
+              // 从中提取 fileId
+              const fileId = lastUrl[1].split('/file/').pop();
+              return `${this.baseURL}/file/${fileId}`;
+            }
+          }
+          
+          // 情况3: 正常的完整 URL，确保使用当前域名
+          if (url.startsWith('https://') && url.includes('/file/')) {
+            const match = url.match(/\/file\/([^?#]+)/);
+            if (match) {
+              return `${this.baseURL}/file/${match[1]}`;
+            }
+          }
+          
+          // 情况4: 相对路径，补全域名
+          if (url.startsWith('/file/')) {
+            return `${this.baseURL}${url}`;
+          }
+          
+          return url;
         },
 
         // 工具方法
