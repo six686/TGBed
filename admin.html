@@ -50,6 +50,7 @@
             <el-dropdown @command="switchFileType" :hide-on-click="false">
               <span class="el-dropdown-link"><i :class="fileTypeIcon"></i></span>
               <el-dropdown-menu slot="dropdown">
+                <el-dropdown-item command="all" :class="{ 'el-dropdown-menu__item--selected': fileType === 'all' }"><i class="fas fa-th-large"></i> 全部</el-dropdown-item>
                 <el-dropdown-item command="image" :class="{ 'el-dropdown-menu__item--selected': fileType === 'image' }"><i :class="fileConfig.image.icon"></i> 图片</el-dropdown-item>
                 <el-dropdown-item command="video" :class="{ 'el-dropdown-menu__item--selected': fileType === 'video' }"><i :class="fileConfig.video.icon"></i> 视频</el-dropdown-item>
                 <el-dropdown-item command="audio" :class="{ 'el-dropdown-menu__item--selected': fileType === 'audio' }"><i :class="fileConfig.audio.icon"></i> 音频</el-dropdown-item>
@@ -148,8 +149,8 @@
       <el-main class="main-container">
         <div class="content">
           <template v-for="(item, index) in paginatedTableData" :key="index">
-            <!-- 图片 -->
-            <template v-if="fileType === 'image'">
+            <!-- 图片 - 根据实际文件类型渲染 -->
+            <template v-if="getActualFileType(item.name) === 'image'">
               <el-card class="image-card">
                 <span class="collect-icon" @click.stop="toggleLike(index, item.name)">
                 <i :class="item.metadata.liked ? 'fa-solid fa-bookmark liked' : 'fa-regular fa-bookmark not-liked'"></i>
@@ -188,8 +189,8 @@
               </div>
               </el-card>
             </template>
-            <!-- 视频 -->
-            <template v-else-if="fileType === 'video'">
+            <!-- 视频 - 根据实际文件类型渲染 -->
+            <template v-else-if="getActualFileType(item.name) === 'video'">
               <el-card class="video-card" :class="{ 'selected': item.selected }">
                 <div class="video-content">
                   <video :src="'/file/' + item.name" controls style="width: 100%; height: 100%; object-fit: cover;"></video>
@@ -211,14 +212,15 @@
                     <button class="control-btn like-btn" @click.stop="toggleLike(index, item.name)"><i :class="item.metadata.liked ? 'fas fa-heart liked' : 'far fa-heart'"></i></button>
                     <button class="control-btn edit-btn" @click.stop="handleEditName(item)"><i class="fas fa-edit"></i></button>
                     <button class="control-btn select-btn" @click.stop="toggleSelect(index, item.name)"><i :class="item.selected ? 'fas fa-square-check selected' : 'far fa-square'"></i></button>
+                    <button class="control-btn" @click.stop="openPreview(item)" title="预览"><i class="fas fa-eye"></i></button>
                     <button class="control-btn" @click.stop="handleCopy(index, item.name)"><i class="fas fa-link"></i></button>
                     <button class="control-btn" @click.stop="handleDelete(index, item.name)"><i class="fas fa-trash-alt"></i></button>
                   </div>
                 </div>
               </el-card>
             </template>
-            <!-- 音频 -->
-            <template v-else-if="fileType === 'audio'">
+            <!-- 音频 - 根据实际文件类型渲染 -->
+            <template v-else-if="getActualFileType(item.name) === 'audio'">
               <el-card class="audio-card" :class="{ 'selected': item.selected }">
                 <div class="audio-content">
                   <!-- 音频标题区域 -->
@@ -255,13 +257,14 @@
                     <button class="control-btn like-btn" @click.stop="toggleLike(index, item.name)"><i :class="item.metadata.liked ? 'fas fa-heart liked' : 'far fa-heart'"></i></button>
                     <button class="control-btn edit-btn" @click.stop="handleEditName(item)"><i class="fas fa-edit"></i></button>
                     <button class="control-btn select-btn" @click.stop="toggleSelect(index, item.name)"><i :class="item.selected ? 'fas fa-square-check selected' : 'far fa-square'"></i></button>
+                    <button class="control-btn" @click.stop="openPreview(item)" title="预览"><i class="fas fa-eye"></i></button>
                     <button class="control-btn" @click.stop="handleCopy(index, item.name)"><i class="fas fa-copy"></i></button>
                     <button class="control-btn" @click.stop="handleDelete(index, item.name)"><i class="fas fa-trash-alt"></i></button>
                   </div>
                 </div>
               </el-card>
             </template>
-            <!-- 文件 -->
+            <!-- 其他文件（文档等） - 默认渲染 -->
             <template v-else>
               <el-card class="file-card" :class="{ 'selected': item.selected }">
                 <div class="file-content">
@@ -292,6 +295,7 @@
                     <button class="control-btn like-btn" @click.stop="toggleLike(index, item.name)"><i :class="item.metadata.liked ? 'fas fa-heart liked' : 'far fa-heart'"></i></button>
                     <button class="control-btn edit-btn" @click.stop="handleEditName(item)"><i class="fas fa-edit"></i></button>
                     <button class="control-btn select-btn" @click.stop="toggleSelect(index, item.name)"><i :class="item.selected ? 'fas fa-square-check selected' : 'far fa-square'"></i></button>
+                    <button class="control-btn" @click.stop="openPreview(item)" title="预览"><i class="fas fa-eye"></i></button>
                     <button class="control-btn" @click.stop="handleCopy(index, item.name)"><i class="fas fa-copy"></i></button>
                     <button class="control-btn" @click.stop="handleDelete(index, item.name)"><i class="fas fa-trash-alt"></i></button>
                   </div>
@@ -328,6 +332,12 @@
       baseURL: document.location.origin,
       Number: 0,
       fileConfig: {
+        all: {
+          name: '全部',
+          exts: [],  // 空数组表示匹配所有
+          icon: 'fas fa-th-large',
+          count: 0
+        },
         image: {
           name: '图片',
           exts: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'ico', 'svg', 'heic', 'heif', 'avif'],
@@ -365,7 +375,7 @@
       selectedFiles: [],
       sortOption: 'dateDesc',
       filterOption: 'all',
-      fileType: 'image',
+      fileType: 'all',
       storageFilter: 'all', // all | telegram | r2
       loadMode: 'normal', // normal | dataSaver | noImage
       safeMode: true, // NSFW 安全模式
@@ -405,11 +415,20 @@
 
           // 文件类型匹配
           const ext = data.name.split('.').pop().toLowerCase();
-          const matchesType = this.fileType === 'document' ?
-          !Object.keys(this.fileConfig).some(type =>
-            type !== 'document' && this.fileConfig[type].exts.includes(ext) // 匹配其他所有文件
-          ) :
-          this.fileConfig[this.fileType].exts.includes(ext);
+          let matchesType = true;
+          
+          if (this.fileType === 'all') {
+            // 全部模式：显示所有文件
+            matchesType = true;
+          } else if (this.fileType === 'document') {
+            // 文档模式：排除图片、视频、音频
+            matchesType = !Object.keys(this.fileConfig).some(type =>
+              type !== 'document' && type !== 'all' && this.fileConfig[type].exts.includes(ext)
+            );
+          } else {
+            // 特定类型模式
+            matchesType = this.fileConfig[this.fileType].exts.includes(ext);
+          }
 
           // 存储类型匹配
           const isR2 = data.name.startsWith('r2:');
@@ -439,10 +458,11 @@
         this.filterOption === 'adult' ? 'fas fa-user-secret' : '';
       },
       fileTypeIcon() {
-        return this.fileType === 'image' ? 'fas fa-image' :
+        return this.fileType === 'all' ? 'fas fa-th-large' :
+        this.fileType === 'image' ? 'fas fa-image' :
         this.fileType === 'video' ? 'fas fa-video' :
         this.fileType === 'audio' ? 'fas fa-music' :
-        this.fileType === 'document' ? 'fas fa-folder-open' : '';
+        this.fileType === 'document' ? 'fas fa-folder-open' : 'fas fa-th-large';
       },
       storageFilterIcon() {
         return this.storageFilter === 'all' ? 'fas fa-database' :
@@ -466,6 +486,38 @@
       clearSelection() {  // 取消全部选择
         this.tableData.forEach(file => file.selected = false);
       },
+      
+      // 获取文件的实际类型（用于模板条件渲染）
+      getActualFileType(fileName) {
+        const ext = fileName.split('.').pop().toLowerCase();
+        if (this.fileConfig.image.exts.includes(ext)) return 'image';
+        if (this.fileConfig.video.exts.includes(ext)) return 'video';
+        if (this.fileConfig.audio.exts.includes(ext)) return 'audio';
+        return 'document';  // 默认归类为文档
+      },
+      
+      // 打开预览 - 使用 Blog 统一媒体预览服务
+      openPreview(item) {
+        const fileName = item.metadata?.fileName || item.name;
+        const fileUrl = `${this.baseURL}/file/${item.name}`;
+        const fileType = this.getActualFileType(item.name);
+        
+        // 图片类型 - 使用 el-image 的预览功能（已在模板中处理）
+        if (fileType === 'image') {
+          // 图片已通过 el-image 的 preview-src-list 处理
+          return;
+        }
+        
+        // 视频/音频/文档类型 - 使用 Blog Preview iframe
+        const PREVIEW_SERVICE_BASE = 'https://www.katelya.eu.org';
+        const targetUrl = encodeURIComponent(fileUrl);
+        const targetTitle = encodeURIComponent(fileName);
+        const previewUrl = `${PREVIEW_SERVICE_BASE}/preview?url=${targetUrl}&title=${targetTitle}&autoplay=1`;
+        
+        // 在新窗口打开预览
+        window.open(previewUrl, '_blank');
+      },
+      
       async handleLogout() {  // 退出登录
         try {
           const response = await fetch('./api/auth/logout', { method: 'POST', credentials: 'include' });
