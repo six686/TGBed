@@ -171,7 +171,163 @@ export function shouldUseSignedTelegramLinks(env) {
 }
 
 export function shouldWriteTelegramMetadata(env) {
-  return !shouldUseSignedTelegramLinks(env);
+  const metadataMode = String(env?.TELEGRAM_METADATA_MODE || "")
+    .trim()
+    .toLowerCase();
+  if (["off", "none", "disable", "disabled", "minimal"].includes(metadataMode)) {
+    return false;
+  }
+  if (["on", "full", "always", "enable", "enabled"].includes(metadataMode)) {
+    return true;
+  }
+
+  const skipMetadata = String(env?.TELEGRAM_SKIP_METADATA || "")
+    .trim()
+    .toLowerCase();
+  if (["1", "true", "yes", "on"].includes(skipMetadata)) {
+    return false;
+  }
+
+  // Default to writing lightweight metadata so admin list and management actions keep working.
+  return true;
+}
+
+function normalizeBaseUrl(raw) {
+  if (!raw) return "";
+  try {
+    return new URL(String(raw)).toString().replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function formatFileSize(bytes) {
+  const numeric = Number(bytes || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0 B";
+  if (numeric < 1024) return `${numeric} B`;
+  if (numeric < 1024 * 1024) return `${(numeric / 1024).toFixed(2)} KB`;
+  if (numeric < 1024 * 1024 * 1024) {
+    return `${(numeric / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  return `${(numeric / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function isFlagEnabled(rawValue, defaultValue) {
+  const normalized = String(rawValue ?? "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return defaultValue;
+  if (["1", "true", "yes", "on", "enable", "enabled"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off", "disable", "disabled"].includes(normalized)) {
+    return false;
+  }
+  return defaultValue;
+}
+
+export function shouldNotifyTelegramUpload(env) {
+  return isFlagEnabled(
+    env?.TG_UPLOAD_NOTIFY ?? env?.TELEGRAM_UPLOAD_NOTIFY,
+    true
+  );
+}
+
+export function buildTelegramDirectLink(env, directId, fallbackOrigin = "") {
+  const publicBase = normalizeBaseUrl(env?.PUBLIC_BASE_URL);
+  const fallbackBase = normalizeBaseUrl(fallbackOrigin);
+  const base = publicBase || fallbackBase;
+  if (!base) return `/file/${directId}`;
+  return `${base}/file/${directId}`;
+}
+
+export function buildTelegramUploadNoticeText({
+  directLink,
+  fileId,
+  messageId,
+  fileName,
+  fileSize,
+}) {
+  const safeName = truncateFileName(fileName || "", 120) || "unnamed";
+  const lines = [
+    "Upload completed",
+    `Name: ${safeName}`,
+    `Size: ${formatFileSize(fileSize)}`,
+    `Direct Link: ${directLink}`,
+    `File ID: ${fileId}`,
+  ];
+  if (messageId) lines.push(`Message ID: ${messageId}`);
+  return lines.join("\n");
+}
+
+async function postTelegramMessage(payload, env) {
+  const response = await fetch(buildTelegramBotApiUrl(env, "sendMessage"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  return { ok: response.ok && data?.ok, data };
+}
+
+export async function sendTelegramUploadNotice(
+  {
+    chatId,
+    replyToMessageId,
+    directLink,
+    fileId,
+    messageId,
+    fileName,
+    fileSize,
+    text,
+  },
+  env
+) {
+  if (!shouldNotifyTelegramUpload(env)) {
+    return { ok: false, skipped: true, reason: "disabled" };
+  }
+
+  const targetChatId = chatId || env?.TG_Chat_ID;
+  if (!targetChatId || !env?.TG_Bot_Token) {
+    return { ok: false, skipped: true, reason: "missing-config" };
+  }
+
+  const finalText =
+    text ||
+    buildTelegramUploadNoticeText({
+      directLink,
+      fileId,
+      messageId,
+      fileName,
+      fileSize,
+    });
+
+  const payload = {
+    chat_id: targetChatId,
+    text: finalText,
+    disable_web_page_preview: true,
+  };
+
+  if (replyToMessageId) {
+    payload.reply_to_message_id = Number(replyToMessageId);
+    payload.allow_sending_without_reply = true;
+  }
+
+  try {
+    let result = await postTelegramMessage(payload, env);
+    if (!result.ok && payload.reply_to_message_id) {
+      // Some channel configurations reject replies. Retry once without reply target.
+      const fallbackPayload = {
+        chat_id: targetChatId,
+        text: finalText,
+        disable_web_page_preview: true,
+      };
+      result = await postTelegramMessage(fallbackPayload, env);
+    }
+    return result;
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 }
 
 function getFileLinkSecrets(env) {

@@ -9,10 +9,12 @@
 
 // 允许的最大文件大小（20MB，与Telegram限制一致）
 import {
+  buildTelegramDirectLink,
   buildTelegramBotApiUrl,
   createSignedTelegramFileId,
   getTelegramUploadMethodAndField,
   pickTelegramFileId,
+  sendTelegramUploadNotice,
   shouldUseSignedTelegramLinks,
   shouldWriteTelegramMetadata,
 } from "../utils/telegram.js";
@@ -111,7 +113,15 @@ export async function onRequestPost(context) {
       return await uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env);
     } else {
       // 默认上传到 Telegram
-      return await uploadToTelegram(arrayBuffer, fileName, fileExtension, contentType, fileSize, env);
+      return await uploadToTelegram(
+        arrayBuffer,
+        fileName,
+        fileExtension,
+        contentType,
+        fileSize,
+        env,
+        new URL(request.url).origin
+      );
     }
   } catch (error) {
     console.error("URL upload error:", error);
@@ -168,7 +178,15 @@ function getExtensionFromMimeType(mimeType) {
 }
 
 // --- Telegram 上传 ---
-async function uploadToTelegram(arrayBuffer, fileName, fileExtension, contentType, fileSize, env) {
+async function uploadToTelegram(
+  arrayBuffer,
+  fileName,
+  fileExtension,
+  contentType,
+  fileSize,
+  env,
+  fallbackOrigin = ""
+) {
   // 从 arrayBuffer 创建 Blob 和 File
   const blob = new Blob([arrayBuffer], { type: contentType });
   const file = new File([blob], fileName, { type: contentType });
@@ -213,7 +231,8 @@ async function uploadToTelegram(arrayBuffer, fileName, fileExtension, contentTyp
           fileExtension,
           contentType,
           fileSize,
-          env
+          env,
+          fallbackOrigin
         );
       }
     }
@@ -226,7 +245,8 @@ async function uploadToTelegram(arrayBuffer, fileName, fileExtension, contentTyp
     fileExtension,
     contentType,
     fileSize,
-    env
+    env,
+    fallbackOrigin
   );
 }
 
@@ -236,7 +256,8 @@ async function processTelegramSuccess(
   fileExtension,
   mimeType,
   fileSize,
-  env
+  env,
+  fallbackOrigin = ""
 ) {
   const fileId = pickTelegramFileId(responseData);
   const messageId = responseData?.result?.message_id;
@@ -266,10 +287,35 @@ async function processTelegramSuccess(
         fileName: fileName,
         fileSize: fileSize,
         storageType: "telegram",
+        telegramFileId: fileId,
         telegramMessageId: messageId || undefined,
         signedLink: shouldUseSignedTelegramLinks(env),
       },
     });
+  }
+
+  const directLink = buildTelegramDirectLink(env, directId, fallbackOrigin);
+  try {
+    const noticeResult = await sendTelegramUploadNotice(
+      {
+        chatId: env.TG_Chat_ID,
+        replyToMessageId: messageId || undefined,
+        directLink,
+        fileId,
+        messageId,
+        fileName,
+        fileSize,
+      },
+      env
+    );
+    if (!noticeResult?.ok && !noticeResult?.skipped) {
+      console.warn(
+        "Telegram upload notice failed:",
+        noticeResult?.data?.description || noticeResult?.error || "unknown error"
+      );
+    }
+  } catch (error) {
+    console.warn("Telegram upload notice error:", error.message);
   }
 
   return jsonResponse([{ src: `/file/${directId}` }]);

@@ -7,10 +7,12 @@ import { createS3Client } from '../../utils/s3client.js';
 import { uploadToDiscord } from '../../utils/discord.js';
 import { hasHuggingFaceConfig, uploadToHuggingFace } from '../../utils/huggingface.js';
 import {
+  buildTelegramDirectLink,
   buildTelegramBotApiUrl,
   createSignedTelegramFileId,
   getTelegramUploadMethodAndField,
   pickTelegramFileId,
+  sendTelegramUploadNotice,
   shouldUseSignedTelegramLinks,
   shouldWriteTelegramMetadata,
 } from '../../utils/telegram.js';
@@ -81,6 +83,7 @@ export async function onRequestPost(context) {
     let responseFileKey = null;
     let metadataKey = null;
     let extraMetadata = {};
+    let telegramNoticePayload = null;
 
     if (storageType === 'r2') {
       if (!env.R2_BUCKET) {
@@ -155,6 +158,15 @@ export async function onRequestPost(context) {
         env
       );
       extraMetadata.signedLink = shouldUseSignedTelegramLinks(env);
+      extraMetadata.telegramFileId = result.fileId;
+      telegramNoticePayload = {
+        replyToMessageId: taskData.telegramMessageId || undefined,
+        directLink: buildTelegramDirectLink(env, responseFileKey, new URL(request.url).origin),
+        fileId: result.fileId,
+        messageId: taskData.telegramMessageId || undefined,
+        fileName: taskData.fileName,
+        fileSize: taskData.fileSize,
+      };
     }
 
     const shouldWriteMetadata =
@@ -177,6 +189,16 @@ export async function onRequestPost(context) {
           ...extraMetadata,
         },
       });
+    }
+
+    if (storageType === 'telegram' && telegramNoticePayload) {
+      const noticeResult = await sendTelegramUploadNotice(telegramNoticePayload, env);
+      if (!noticeResult?.ok && !noticeResult?.skipped) {
+        console.warn(
+          'Chunked Telegram upload notice failed:',
+          noticeResult?.data?.description || noticeResult?.error || 'unknown error'
+        );
+      }
     }
 
     await cleanupUploadTask(uploadId, totalChunks, chunkBackend, env);

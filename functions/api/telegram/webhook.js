@@ -1,7 +1,8 @@
-﻿import {
-  buildTelegramBotApiUrl,
+import {
+  buildTelegramDirectLink,
   createSignedTelegramFileId,
   getTelegramFileFromMessage,
+  sendTelegramUploadNotice,
   shouldUseSignedTelegramLinks,
   shouldWriteTelegramMetadata,
 } from '../../utils/telegram.js';
@@ -73,6 +74,7 @@ export async function onRequestPost(context) {
         fileName: media.fileName,
         fileSize: media.fileSize,
         storageType: 'telegram',
+        telegramFileId: media.fileId,
         telegramMessageId: media.messageId || undefined,
         fromWebhook: true,
         signedLink: useSigned,
@@ -80,23 +82,28 @@ export async function onRequestPost(context) {
     });
   }
 
-  const publicBase = normalizeBaseUrl(env.PUBLIC_BASE_URL) || new URL(request.url).origin;
-  const directLink = `${publicBase}/file/${directId}`;
+  const directLink = buildTelegramDirectLink(env, directId, new URL(request.url).origin);
   const chatId = message?.chat?.id;
 
   if (chatId) {
-    const replyText = `File received. Direct link:\n${directLink}\n\nFile ID: ${media.fileId}`;
-
-    await sendTelegramMessage(
+    const noticeResult = await sendTelegramUploadNotice(
       {
-        chat_id: chatId,
-        text: replyText,
-        reply_to_message_id: message.message_id,
-        allow_sending_without_reply: true,
-        disable_web_page_preview: true,
+        chatId,
+        replyToMessageId: message.message_id,
+        directLink,
+        fileId: media.fileId,
+        messageId: media.messageId || message.message_id,
+        fileName: media.fileName,
+        fileSize: media.fileSize,
       },
       env
     );
+    if (!noticeResult?.ok && !noticeResult?.skipped) {
+      console.warn(
+        'Webhook reply failed:',
+        noticeResult?.data?.description || noticeResult?.error || 'unknown error'
+      );
+    }
   }
 
   return jsonResponse({
@@ -105,32 +112,6 @@ export async function onRequestPost(context) {
     storageType: 'telegram',
     mode: useSigned ? 'signed' : 'kv',
   });
-}
-
-async function sendTelegramMessage(payload, env) {
-  try {
-    const response = await fetch(buildTelegramBotApiUrl(env, 'sendMessage'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data?.ok) {
-      console.warn('Webhook reply failed:', data?.description || response.statusText);
-    }
-  } catch (error) {
-    console.warn('Webhook reply request error:', error.message);
-  }
-}
-
-function normalizeBaseUrl(input) {
-  if (!input) return '';
-  try {
-    const parsed = new URL(input);
-    return parsed.toString().replace(/\/+$/, '');
-  } catch {
-    return '';
-  }
 }
 
 function jsonResponse(body, status = 200) {

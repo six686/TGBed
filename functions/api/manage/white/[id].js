@@ -1,23 +1,54 @@
-export async function onRequest(context) {
-    // Contents of context object
-    const {
-      request, // same as existing Worker API
-      env, // same as existing Worker API
-      params, // if filename includes [id] or [[path]]
-      waitUntil, // same as ctx.waitUntil in existing Worker API
-      next, // used for middleware or to fetch assets
-      data, // arbitrary space for passing data between middlewares
-    } = context;
-    console.log(env)
-    console.log(params.id)
-    //read the metadata
-    const value = await env.img_url.getWithMetadata(params.id);
-    console.log(value)
-    //"metadata":{"TimeStamp":19876541,"ListType":"None","rating_label":"None"}
-    //change the metadata
-    value.metadata.ListType = "White"
-    await env.img_url.put(params.id,"",{metadata: value.metadata});
-    const info = JSON.stringify(value.metadata);
-    return new Response(info);
+const PREFIXES = ['img:', 'vid:', 'aud:', 'doc:', 'r2:', 's3:', 'discord:', 'hf:', ''];
 
+function decodeFileId(raw) {
+  try {
+    return decodeURIComponent(raw || '');
+  } catch {
+    return String(raw || '');
   }
+}
+
+async function getRecordWithKey(env, fileId) {
+  const hasKnownPrefix = PREFIXES.some((prefix) => prefix && fileId.startsWith(prefix));
+  const candidateKeys = hasKnownPrefix ? [fileId] : PREFIXES.map((prefix) => `${prefix}${fileId}`);
+
+  for (const key of candidateKeys) {
+    const record = await env.img_url.getWithMetadata(key);
+    if (record?.metadata) {
+      return { record, kvKey: key };
+    }
+  }
+
+  return { record: null, kvKey: fileId };
+}
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+export async function onRequest(context) {
+  const { params, env } = context;
+
+  if (!env.img_url) {
+    return jsonResponse({ success: false, error: 'KV binding img_url is not configured.' }, 500);
+  }
+
+  const fileId = decodeFileId(params.id);
+  const { record, kvKey } = await getRecordWithKey(env, fileId);
+
+  if (!record?.metadata) {
+    return jsonResponse({ success: false, error: `Image metadata not found for ID: ${fileId}` }, 404);
+  }
+
+  const metadata = {
+    ...record.metadata,
+    ListType: 'White',
+  };
+
+  await env.img_url.put(kvKey, '', { metadata });
+
+  return jsonResponse({ success: true, listType: metadata.ListType, key: kvKey });
+}

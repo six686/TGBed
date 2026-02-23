@@ -114,6 +114,8 @@
 | `TG_WEBHOOK_SECRET` | Webhook 密钥，校验头 `X-Telegram-Bot-Api-Secret-Token` | `your-secret` |
 | `TELEGRAM_LINK_MODE` | Telegram 链接模式，设为 `signed` 启用签名直链 | `signed` |
 | `MINIMIZE_KV_WRITES` | 设为 `true` 时启用低 KV 写入策略（也会启用签名直链） | `true` |
+| `TELEGRAM_METADATA_MODE` | Telegram 元数据写入策略：`off` 关闭后台索引写入，默认写轻量索引 | `off` |
+| `TG_UPLOAD_NOTIFY` | 网页上传成功后，是否额外发送“直链+File ID”通知消息 | `true` |
 | `FILE_URL_SECRET` | 签名直链密钥（不填则回退到 `TG_Bot_Token`） | `random-long-secret` |
 
 **Webhook 部署步骤：**
@@ -152,9 +154,9 @@ curl -X POST "http://127.0.0.1:8081/bot<YOUR_BOT_TOKEN>/setWebhook" \
 - `TELEGRAM_LINK_MODE=signed`（仅 Telegram 文件使用签名直链）
 - 或 `MINIMIZE_KV_WRITES=true`（同时影响分片上传任务写入策略）
 
-启用后，Telegram 文件可不写入 KV 元数据，下载时通过签名参数直接解析 `file_id`，从而显著减少 KV 读写压力。
+启用后，Telegram 文件默认仍会写入轻量 KV 索引（用于后台列表和管理操作），下载时通过签名参数直接解析 `file_id`，从而降低 KV 读写压力。
 
-> **取舍说明：** 低 KV 模式下，未写入 KV 的 Telegram 文件不会出现在后台文件列表中，也无法使用依赖 KV 元数据的标签/黑白名单/删除流程。
+> **可选取舍：** 若你希望 Telegram 文件完全不写入 KV，请额外设置 `TELEGRAM_METADATA_MODE=off`。此时文件不会出现在后台列表，也无法使用依赖 KV 元数据的标签/黑白名单/删除流程。
 
 ### KV 存储（图片管理，必需）
 
@@ -320,6 +322,8 @@ curl -X POST "http://127.0.0.1:8081/bot<YOUR_BOT_TOKEN>/setWebhook" \
 | `TG_WEBHOOK_SECRET` | Telegram Webhook 密钥（也兼容 `TELEGRAM_WEBHOOK_SECRET`） | - |
 | `TELEGRAM_LINK_MODE` | Telegram 链接模式（`signed` 为签名直链） | - |
 | `MINIMIZE_KV_WRITES` | 降低 KV 写入（也会启用签名直链） | `false` |
+| `TELEGRAM_METADATA_MODE` | Telegram 元数据写入策略（`off` 关闭后台索引写入） | `on` |
+| `TG_UPLOAD_NOTIFY` | 网页上传成功后发送“直链+File ID”通知消息 | `true` |
 | `FILE_URL_SECRET` | 签名直链密钥（也兼容 `TG_FILE_URL_SECRET`） | `TG_Bot_Token` |
 | `CHUNK_BACKEND` | 分片临时存储后端（`auto`/`r2`/`kv`） | `auto` |
 | `disable_telemetry` | 禁用遥测 | - |
@@ -375,6 +379,8 @@ curl -X POST "http://127.0.0.1:8081/bot<YOUR_BOT_TOKEN>/setWebhook" \
 | `TELEGRAM_WEBHOOK_SECRET` | 同上（兼容变量名） | 可选 |
 | `TELEGRAM_LINK_MODE` | Telegram 链接模式（`signed`） | 可选 |
 | `MINIMIZE_KV_WRITES` | 降低 KV 写入并启用签名直链 | 可选 |
+| `TELEGRAM_METADATA_MODE` | Telegram 元数据写入策略（`off` 关闭后台索引写入） | 可选 |
+| `TG_UPLOAD_NOTIFY` | 网页上传成功后发送“直链+File ID”通知消息 | 可选 |
 | `FILE_URL_SECRET` | 签名直链密钥 | 可选 |
 | `TG_FILE_URL_SECRET` | 同上（兼容变量名） | 可选 |
 | `BASIC_USER` | 管理后台用户名 | 可选 |

@@ -5,10 +5,12 @@ import { createS3Client } from "./utils/s3client.js";
 import { uploadToDiscord } from "./utils/discord.js";
 import { hasHuggingFaceConfig, uploadToHuggingFace } from "./utils/huggingface.js";
 import {
+    buildTelegramDirectLink,
     buildTelegramBotApiUrl,
     createSignedTelegramFileId,
     getTelegramUploadMethodAndField,
     pickTelegramFileId,
+    sendTelegramUploadNotice,
     shouldUseSignedTelegramLinks,
     shouldWriteTelegramMetadata,
 } from "./utils/telegram.js";
@@ -71,7 +73,13 @@ export async function onRequestPost(context) {
             result = await uploadToHFStorage(uploadFile, fileName, fileExtension, env);
         } else {
             // 默认上传到 Telegram
-            result = await uploadToTelegramStorage(uploadFile, fileName, fileExtension, env);
+            result = await uploadToTelegramStorage(
+                uploadFile,
+                fileName,
+                fileExtension,
+                env,
+                new URL(request.url).origin
+            );
         }
 
         // 如果返回的已经是 Response 对象，直接返回
@@ -113,7 +121,13 @@ function errorResponse(message, status = 500) {
 }
 
 // --- Telegram 上传 ---
-async function uploadToTelegramStorage(uploadFile, fileName, fileExtension, env) {
+async function uploadToTelegramStorage(
+    uploadFile,
+    fileName,
+    fileExtension,
+    env,
+    fallbackOrigin = ""
+) {
     const telegramFormData = new FormData();
     telegramFormData.append("chat_id", env.TG_Chat_ID);
 
@@ -153,10 +167,35 @@ async function uploadToTelegramStorage(uploadFile, fileName, fileExtension, env)
                 fileName: fileName,
                 fileSize: uploadFile.size,
                 storageType: 'telegram',
+                telegramFileId: fileId,
                 telegramMessageId: messageId || undefined,
                 signedLink: shouldUseSignedTelegramLinks(env),
             }
         });
+    }
+
+    const directLink = buildTelegramDirectLink(env, directId, fallbackOrigin);
+    try {
+        const noticeResult = await sendTelegramUploadNotice(
+            {
+                chatId: env.TG_Chat_ID,
+                replyToMessageId: messageId || undefined,
+                directLink,
+                fileId,
+                messageId,
+                fileName,
+                fileSize: uploadFile.size,
+            },
+            env
+        );
+        if (!noticeResult?.ok && !noticeResult?.skipped) {
+            console.warn(
+                "Telegram upload notice failed:",
+                noticeResult?.data?.description || noticeResult?.error || "unknown error"
+            );
+        }
+    } catch (error) {
+        console.warn("Telegram upload notice error:", error.message);
     }
 
     return new Response(

@@ -5,6 +5,7 @@ import {
     buildTelegramBotApiUrl,
     buildTelegramFileUrl,
     parseSignedTelegramFileId,
+    shouldWriteTelegramMetadata,
 } from '../utils/telegram.js';
 
 // MIME 类型映射表
@@ -335,6 +336,9 @@ async function handleSignedTelegramFile(context, signedMeta) {
         return new Response('Failed to get file path from Telegram', { status: 500, headers });
     }
 
+    // Backfill metadata so signed links can appear in admin list and support management actions.
+    await backfillSignedTelegramMetadata(env, signedMeta);
+
     const fileUrl = buildTelegramFileUrl(env, filePath);
     const fileName = signedMeta.fileName || `${signedMeta.fileId}.${signedMeta.fileExtension || 'bin'}`;
     const mimeType = signedMeta.mimeType || getMimeType(fileName);
@@ -366,6 +370,40 @@ async function handleSignedTelegramFile(context, signedMeta) {
     }
 
     return createStreamResponse(response, fileName, mimeType, rangeHeader);
+}
+
+async function backfillSignedTelegramMetadata(env, signedMeta) {
+    if (!env.img_url || !shouldWriteTelegramMetadata(env)) {
+        return;
+    }
+
+    const fileExtension = signedMeta.fileExtension || 'bin';
+    const kvKey = `${signedMeta.fileId}.${fileExtension}`;
+
+    try {
+        const existing = await env.img_url.getWithMetadata(kvKey);
+        if (existing?.metadata) {
+            return;
+        }
+
+        await env.img_url.put(kvKey, '', {
+            metadata: {
+                TimeStamp: signedMeta.timestamp || Date.now(),
+                ListType: 'None',
+                Label: 'None',
+                liked: false,
+                fileName: signedMeta.fileName || `${signedMeta.fileId}.${fileExtension}`,
+                fileSize: signedMeta.fileSize || 0,
+                storageType: 'telegram',
+                telegramFileId: signedMeta.fileId,
+                telegramMessageId: signedMeta.messageId || undefined,
+                signedLink: true,
+                source: 'signed-backfill',
+            }
+        });
+    } catch (error) {
+        console.warn('Signed metadata backfill skipped:', error.message);
+    }
 }
 function createStreamResponse(upstreamResponse, fileName, mimeType, rangeHeader) {
     const headers = new Headers();
