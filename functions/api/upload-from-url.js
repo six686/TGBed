@@ -8,15 +8,24 @@
  */
 
 // 允许的最大文件大小（20MB，与Telegram限制一致）
+import {
+  buildTelegramBotApiUrl,
+  createSignedTelegramFileId,
+  getTelegramUploadMethodAndField,
+  pickTelegramFileId,
+  shouldUseSignedTelegramLinks,
+  shouldWriteTelegramMetadata,
+} from "../utils/telegram.js";
+
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
-// 请求超时时间（30秒）
+// 请求超时时间�?0秒）
 const FETCH_TIMEOUT = 30000;
 
 export async function onRequestPost(context) {
   const { request, env } = context;
 
   try {
-    // 解析请求体
+    // 解析请求�?
     const body = await request.json();
     const { url, storageMode = "telegram" } = body;
 
@@ -69,16 +78,16 @@ export async function onRequestPost(context) {
     const arrayBuffer = await fetchResponse.arrayBuffer();
     const fileSize = arrayBuffer.byteLength;
 
-    // 检查文件大小
+    // 检查文件大�?
     if (fileSize === 0) {
-      return jsonResponse({ error: "目标URL返回的内容为空" }, 400);
+      return jsonResponse({ error: "目标URL返回的内容为�? }, 400);
     }
 
     if (fileSize > MAX_FILE_SIZE) {
       return jsonResponse({ error: `文件大小(${formatSize(fileSize)})超过限制(${formatSize(MAX_FILE_SIZE)})` }, 413);
     }
 
-    // 从URL路径提取文件名
+    // 从URL路径提取文件�?
     let fileName = parsedUrl.pathname.split("/").pop() || "";
     fileName = decodeURIComponent(fileName.split("?")[0]);
 
@@ -97,16 +106,16 @@ export async function onRequestPost(context) {
     // 根据存储模式上传
     if (storageMode === "r2") {
       if (!env.R2_BUCKET) {
-        return jsonResponse({ error: "R2 未配置或未启用" }, 400);
+        return jsonResponse({ error: "R2 未配置或未启�? }, 400);
       }
       return await uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env);
     } else {
-      // 默认上传到 Telegram
+      // 默认上传�?Telegram
       return await uploadToTelegram(arrayBuffer, fileName, fileExtension, contentType, fileSize, env);
     }
   } catch (error) {
     console.error("URL upload error:", error);
-    return jsonResponse({ error: "服务器内部错误: " + error.message }, 500);
+    return jsonResponse({ error: "服务器内部错�? " + error.message }, 500);
   }
 }
 
@@ -160,29 +169,17 @@ function getExtensionFromMimeType(mimeType) {
 
 // --- Telegram 上传 ---
 async function uploadToTelegram(arrayBuffer, fileName, fileExtension, contentType, fileSize, env) {
-  // 从 arrayBuffer 创建 Blob 和 File
+  // �?arrayBuffer 创建 Blob �?File
   const blob = new Blob([arrayBuffer], { type: contentType });
   const file = new File([blob], fileName, { type: contentType });
 
   const formData = new FormData();
   formData.append("chat_id", env.TG_Chat_ID);
 
-  let apiEndpoint;
-  if (contentType.startsWith("image/")) {
-    formData.append("photo", file);
-    apiEndpoint = "sendPhoto";
-  } else if (contentType.startsWith("audio/")) {
-    formData.append("audio", file);
-    apiEndpoint = "sendAudio";
-  } else if (contentType.startsWith("video/")) {
-    formData.append("video", file);
-    apiEndpoint = "sendVideo";
-  } else {
-    formData.append("document", file);
-    apiEndpoint = "sendDocument";
-  }
+  const { method: apiEndpoint, field } = getTelegramUploadMethodAndField(contentType);
+  formData.append(field, file);
 
-  const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`;
+  const apiUrl = buildTelegramBotApiUrl(env, apiEndpoint);
 
   let response;
   try {
@@ -197,38 +194,69 @@ async function uploadToTelegram(arrayBuffer, fileName, fileExtension, contentTyp
   const responseData = await response.json();
 
   if (!response.ok) {
-    // 如果图片/音频上传失败，尝试作为文档上传
+    // 如果图片/音频上传失败，尝试作为文档上�?
     if (apiEndpoint === "sendPhoto" || apiEndpoint === "sendAudio") {
       const docFormData = new FormData();
       docFormData.append("chat_id", env.TG_Chat_ID);
       docFormData.append("document", file);
       
-      const docResponse = await fetch(`https://api.telegram.org/bot${env.TG_Bot_Token}/sendDocument`, {
+      const docResponse = await fetch(buildTelegramBotApiUrl(env, "sendDocument"), {
         method: "POST",
         body: docFormData,
       });
       
       const docData = await docResponse.json();
       if (docResponse.ok) {
-        return await processTelegramSuccess(docData, fileName, fileExtension, fileSize, env);
+        return await processTelegramSuccess(
+          docData,
+          fileName,
+          fileExtension,
+          contentType,
+          fileSize,
+          env
+        );
       }
     }
     return jsonResponse({ error: responseData.description || "Telegram 上传失败" }, 500);
   }
 
-  return await processTelegramSuccess(responseData, fileName, fileExtension, fileSize, env);
+  return await processTelegramSuccess(
+    responseData,
+    fileName,
+    fileExtension,
+    contentType,
+    fileSize,
+    env
+  );
 }
 
-async function processTelegramSuccess(responseData, fileName, fileExtension, fileSize, env) {
-  const fileId = getFileId(responseData);
+async function processTelegramSuccess(
+  responseData,
+  fileName,
+  fileExtension,
+  mimeType,
+  fileSize,
+  env
+) {
+  const fileId = pickTelegramFileId(responseData);
   const messageId = responseData?.result?.message_id;
 
   if (!fileId) {
     return jsonResponse({ error: "无法获取文件ID" }, 500);
   }
 
-  // 保存到 KV
-  if (env.img_url) {
+  const directId = await buildTelegramDirectId(
+    fileId,
+    fileExtension,
+    fileName,
+    mimeType,
+    fileSize,
+    messageId,
+    env
+  );
+
+  // 保存�?KV
+  if (env.img_url && shouldWriteTelegramMetadata(env)) {
     await env.img_url.put(`${fileId}.${fileExtension}`, "", {
       metadata: {
         TimeStamp: Date.now(),
@@ -239,27 +267,12 @@ async function processTelegramSuccess(responseData, fileName, fileExtension, fil
         fileSize: fileSize,
         storageType: "telegram",
         telegramMessageId: messageId || undefined,
+        signedLink: shouldUseSignedTelegramLinks(env),
       },
     });
   }
 
-  return jsonResponse([{ src: `/file/${fileId}.${fileExtension}` }]);
-}
-
-function getFileId(response) {
-  if (!response.ok || !response.result) return null;
-
-  const result = response.result;
-  if (result.photo) {
-    return result.photo.reduce((prev, current) =>
-      prev.file_size > current.file_size ? prev : current
-    ).file_id;
-  }
-  if (result.document) return result.document.file_id;
-  if (result.video) return result.video.file_id;
-  if (result.audio) return result.audio.file_id;
-
-  return null;
+  return jsonResponse([{ src: `/file/${directId}` }]);
 }
 
 // --- R2 上传 ---
@@ -293,4 +306,29 @@ async function uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fil
     console.error("R2 upload error:", error);
     return jsonResponse({ error: "R2 上传失败: " + error.message }, 500);
   }
+}
+
+async function buildTelegramDirectId(
+  fileId,
+  fileExtension,
+  fileName,
+  mimeType,
+  fileSize,
+  messageId,
+  env
+) {
+  if (!shouldUseSignedTelegramLinks(env)) {
+    return `${fileId}.${fileExtension}`;
+  }
+  return await createSignedTelegramFileId(
+    {
+      fileId,
+      fileExtension,
+      fileName,
+      mimeType,
+      fileSize,
+      messageId,
+    },
+    env
+  );
 }

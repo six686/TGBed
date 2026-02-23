@@ -1,6 +1,7 @@
 import { createS3Client } from '../../../utils/s3client.js';
 import { deleteDiscordMessage } from '../../../utils/discord.js';
 import { deleteHuggingFaceFile } from '../../../utils/huggingface.js';
+import { buildTelegramBotApiUrl } from '../../../utils/telegram.js';
 
 export async function onRequest(context) {
   const { request, env, params } = context;
@@ -168,7 +169,7 @@ async function deleteTelegramMessage(messageId, env) {
   }
 
   try {
-    const response = await fetch(`https://api.telegram.org/bot${env.TG_Bot_Token}/deleteMessage`, {
+    const response = await fetch(buildTelegramBotApiUrl(env, 'deleteMessage'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

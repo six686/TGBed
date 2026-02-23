@@ -4,6 +4,14 @@ import { checkGuestUpload, incrementGuestCount } from "./utils/guest.js";
 import { createS3Client } from "./utils/s3client.js";
 import { uploadToDiscord } from "./utils/discord.js";
 import { hasHuggingFaceConfig, uploadToHuggingFace } from "./utils/huggingface.js";
+import {
+    buildTelegramBotApiUrl,
+    createSignedTelegramFileId,
+    getTelegramUploadMethodAndField,
+    pickTelegramFileId,
+    shouldUseSignedTelegramLinks,
+    shouldWriteTelegramMetadata,
+} from "./utils/telegram.js";
 
 export async function onRequestPost(context) {
     const { request, env } = context;
@@ -109,20 +117,8 @@ async function uploadToTelegramStorage(uploadFile, fileName, fileExtension, env)
     const telegramFormData = new FormData();
     telegramFormData.append("chat_id", env.TG_Chat_ID);
 
-    let apiEndpoint;
-    if (uploadFile.type.startsWith('image/')) {
-        telegramFormData.append("photo", uploadFile);
-        apiEndpoint = 'sendPhoto';
-    } else if (uploadFile.type.startsWith('audio/')) {
-        telegramFormData.append("audio", uploadFile);
-        apiEndpoint = 'sendAudio';
-    } else if (uploadFile.type.startsWith('video/')) {
-        telegramFormData.append("video", uploadFile);
-        apiEndpoint = 'sendVideo';
-    } else {
-        telegramFormData.append("document", uploadFile);
-        apiEndpoint = 'sendDocument';
-    }
+    const { method: apiEndpoint, field } = getTelegramUploadMethodAndField(uploadFile.type);
+    telegramFormData.append(field, uploadFile);
 
     const result = await sendToTelegram(telegramFormData, apiEndpoint, env);
 
@@ -130,14 +126,24 @@ async function uploadToTelegramStorage(uploadFile, fileName, fileExtension, env)
         throw new Error(result.error);
     }
 
-    const fileId = getFileId(result.data);
+    const fileId = pickTelegramFileId(result.data);
     const messageId = result.messageId || result.data?.result?.message_id;
 
     if (!fileId) {
         throw new Error('Failed to get file ID');
     }
 
-    if (env.img_url) {
+    const directId = await buildTelegramDirectId(
+        fileId,
+        fileExtension,
+        fileName,
+        uploadFile.type,
+        uploadFile.size,
+        messageId,
+        env
+    );
+
+    if (env.img_url && shouldWriteTelegramMetadata(env)) {
         await env.img_url.put(`${fileId}.${fileExtension}`, "", {
             metadata: {
                 TimeStamp: Date.now(),
@@ -148,35 +154,20 @@ async function uploadToTelegramStorage(uploadFile, fileName, fileExtension, env)
                 fileSize: uploadFile.size,
                 storageType: 'telegram',
                 telegramMessageId: messageId || undefined,
+                signedLink: shouldUseSignedTelegramLinks(env),
             }
         });
     }
 
     return new Response(
-        JSON.stringify([{ 'src': `/file/${fileId}.${fileExtension}` }]),
+        JSON.stringify([{ 'src': `/file/${directId}` }]),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
 }
 
-function getFileId(response) {
-    if (!response.ok || !response.result) return null;
-
-    const result = response.result;
-    if (result.photo) {
-        return result.photo.reduce((prev, current) =>
-            (prev.file_size > current.file_size) ? prev : current
-        ).file_id;
-    }
-    if (result.document) return result.document.file_id;
-    if (result.video) return result.video.file_id;
-    if (result.audio) return result.audio.file_id;
-
-    return null;
-}
-
 async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
     const MAX_RETRIES = 3;
-    const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`;
+    const apiUrl = buildTelegramBotApiUrl(env, apiEndpoint);
 
     try {
         // 使用 AbortController 添加 30 秒超时
@@ -391,4 +382,29 @@ async function uploadToHFStorage(file, fileName, fileExtension, env) {
         console.error('HuggingFace upload error:', error);
         return errorResponse('HuggingFace 上传失败: ' + error.message);
     }
+}
+
+async function buildTelegramDirectId(
+    fileId,
+    fileExtension,
+    fileName,
+    mimeType,
+    fileSize,
+    messageId,
+    env
+) {
+    if (!shouldUseSignedTelegramLinks(env)) {
+        return `${fileId}.${fileExtension}`;
+    }
+    return await createSignedTelegramFileId(
+        {
+            fileId,
+            fileExtension,
+            fileName,
+            mimeType,
+            fileSize,
+            messageId,
+        },
+        env
+    );
 }

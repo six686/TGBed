@@ -1,6 +1,11 @@
 import { createS3Client } from '../utils/s3client.js';
 import { getDiscordFileUrl } from '../utils/discord.js';
 import { getHuggingFaceFile } from '../utils/huggingface.js';
+import {
+    buildTelegramBotApiUrl,
+    buildTelegramFileUrl,
+    parseSignedTelegramFileId,
+} from '../utils/telegram.js';
 
 // MIME 类型映射表
 const MIME_TYPES = {
@@ -128,6 +133,11 @@ export async function onRequest(context) {
     const url = new URL(request.url);
     let fileId = params.id;
 
+    const signedTelegramMeta = await parseSignedTelegramFileId(fileId, env);
+    if (signedTelegramMeta) {
+        return await handleSignedTelegramFile(context, signedTelegramMeta);
+    }
+
     // 检查是否是 R2 存储的文件（以 r2: 开头）
     if (fileId.startsWith('r2:')) {
         return await handleR2File(context, fileId.substring(3)); // 移除 r2: 前缀
@@ -203,29 +213,17 @@ export async function onRequest(context) {
     
     // 从 Telegram 获取文件（原有逻辑）
     let fileUrl = 'https://telegra.ph/' + url.pathname + url.search
-    let isTelegramBotFile = false;
+    
     
     if (url.pathname.length > 39) { // Path length > 39 indicates file uploaded via Telegram Bot API
-        isTelegramBotFile = true;
-        const formdata = new FormData();
-        formdata.append("file_id", url.pathname);
-
-        const requestOptions = {
-            method: "POST",
-            body: formdata,
-            redirect: "follow"
-        };
-        // /file/AgACAgEAAxkDAAMDZt1Gzs4W8dQPWiQJxO5YSH5X-gsAAt-sMRuWNelGOSaEM_9lHHgBAAMCAANtAAM2BA.png
-        //get the AgACAgEAAxkDAAMDZt1Gzs4W8dQPWiQJxO5YSH5X-gsAAt-sMRuWNelGOSaEM_9lHHgBAAMCAANtAAM2BA
-        console.log(url.pathname.split(".")[0].split("/")[2])
-        const filePath = await getFilePath(env, url.pathname.split(".")[0].split("/")[2]);
-        console.log(filePath)
+        const telegramFileId = fileId.split(".")[0];
+        const filePath = await getFilePath(env, telegramFileId);
         if (!filePath) {
             const headers = new Headers();
             addCorsHeaders(headers);
             return new Response('Failed to get file path from Telegram', { status: 500, headers });
         }
-        fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
+        fileUrl = buildTelegramFileUrl(env, filePath);
     }
 
     // 获取文件名和 MIME 类型
@@ -326,6 +324,49 @@ export async function onRequest(context) {
 }
 
 // 创建响应，正确处理 Range 请求和 CORS
+async function handleSignedTelegramFile(context, signedMeta) {
+    const { request, env } = context;
+    const filePath = await getFilePath(env, signedMeta.fileId);
+
+    if (!filePath) {
+        const headers = new Headers();
+        addCorsHeaders(headers);
+        headers.set('Cache-Control', 'no-store, max-age=0');
+        return new Response('Failed to get file path from Telegram', { status: 500, headers });
+    }
+
+    const fileUrl = buildTelegramFileUrl(env, filePath);
+    const fileName = signedMeta.fileName || `${signedMeta.fileId}.${signedMeta.fileExtension || 'bin'}`;
+    const mimeType = signedMeta.mimeType || getMimeType(fileName);
+    const rangeHeader = request.headers.get('Range');
+
+    if (isStreamableType(mimeType) && rangeHeader) {
+        return await handleStreamableFile(fileUrl, fileName, mimeType, rangeHeader, request);
+    }
+
+    const fetchHeaders = new Headers();
+    if (rangeHeader) {
+        fetchHeaders.set('Range', rangeHeader);
+    }
+
+    const response = await fetch(fileUrl, {
+        method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+        headers: fetchHeaders,
+        cf: { cacheTtl: 0, cacheEverything: false },
+    });
+
+    if (!response.ok && response.status !== 206) {
+        const headers = new Headers();
+        addCorsHeaders(headers);
+        return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+        });
+    }
+
+    return createStreamResponse(response, fileName, mimeType, rangeHeader);
+}
 function createStreamResponse(upstreamResponse, fileName, mimeType, rangeHeader) {
     const headers = new Headers();
     
@@ -489,7 +530,7 @@ async function handleStreamableFile(fileUrl, fileName, mimeType, rangeHeader, or
 
 async function getFilePath(env, file_id) {
     try {
-        const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${file_id}`;
+        const url = `${buildTelegramBotApiUrl(env, 'getFile')}?file_id=${encodeURIComponent(file_id)}`;
         const res = await fetch(url, {
             method: 'GET',
         });

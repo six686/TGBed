@@ -1,8 +1,9 @@
+﻿import { parseSignedTelegramFileId } from '../../utils/telegram.js';
+
 // 获取文件元数据 API（包括原始文件名）
 export async function onRequest(context) {
   const { request, env, params } = context;
-  
-  // 处理 CORS
+
   if (request.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -11,38 +12,47 @@ export async function onRequest(context) {
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
         'Access-Control-Max-Age': '86400',
-      }
+      },
     });
   }
-  
+
   const fileId = params.id;
-  
   if (!fileId) {
-    return new Response(JSON.stringify({ error: 'Missing file ID' }), {
-      status: 400,
-      headers: { 
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
+    return jsonResponse({ error: 'Missing file ID' }, 400);
   }
-  
-  if (!env.img_url) {
-    return new Response(JSON.stringify({ error: 'KV storage not available' }), {
-      status: 500,
-      headers: { 
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
-  }
-  
+
   try {
-    // 尝试多种前缀查找（兼容新旧 Key 格式）
+    const signed = await parseSignedTelegramFileId(fileId, env);
+    if (signed) {
+      const fileName = signed.fileName || `${signed.fileId}.${signed.fileExtension || 'bin'}`;
+      return jsonResponse(
+        {
+          success: true,
+          fileId,
+          key: null,
+          fileName,
+          originalName: signed.fileName || null,
+          fileSize: signed.fileSize || 0,
+          uploadTime: signed.timestamp || null,
+          storageType: 'telegram',
+          listType: 'None',
+          label: 'None',
+          liked: false,
+          source: 'signed-link',
+        },
+        200,
+        { 'Cache-Control': 'public, max-age=3600' }
+      );
+    }
+
+    if (!env.img_url) {
+      return jsonResponse({ error: 'KV storage not available' }, 500);
+    }
+
     const prefixes = ['img:', 'vid:', 'aud:', 'doc:', 'r2:', 's3:', 'discord:', 'hf:', ''];
     let record = null;
     let foundKey = null;
-    
+
     for (const prefix of prefixes) {
       const key = `${prefix}${fileId}`;
       record = await env.img_url.getWithMetadata(key);
@@ -51,61 +61,56 @@ export async function onRequest(context) {
         break;
       }
     }
-    
+
     if (!record || !record.metadata) {
-      // 文件不存在或没有元数据
-      return new Response(JSON.stringify({ 
-        error: 'File not found',
-        fileId: fileId,
-        // 返回基本信息（从 fileId 解析）
-        fileName: fileId,
-        originalName: null
-      }), {
-        status: 404,
-        headers: { 
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
+      return jsonResponse(
+        {
+          error: 'File not found',
+          fileId,
+          fileName: fileId,
+          originalName: null,
+        },
+        404
+      );
     }
-    
+
     const metadata = record.metadata;
-    
-    // 返回文件元数据
-    return new Response(JSON.stringify({
-      success: true,
-      fileId: fileId,
-      key: foundKey,
-      // 原始文件名（上传时保存的）
-      fileName: metadata.fileName || fileId,
-      originalName: metadata.fileName || null,
-      // 其他元数据
-      fileSize: metadata.fileSize || 0,
-      uploadTime: metadata.TimeStamp || null,
-      storageType: metadata.storageType || metadata.storage || 'telegram',
-      listType: metadata.ListType || 'None',
-      label: metadata.Label || 'None',
-      liked: metadata.liked || false
-    }), {
-      status: 200,
-      headers: { 
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=3600'
-      }
-    });
-    
+    return jsonResponse(
+      {
+        success: true,
+        fileId,
+        key: foundKey,
+        fileName: metadata.fileName || fileId,
+        originalName: metadata.fileName || null,
+        fileSize: metadata.fileSize || 0,
+        uploadTime: metadata.TimeStamp || null,
+        storageType: metadata.storageType || metadata.storage || 'telegram',
+        listType: metadata.ListType || 'None',
+        label: metadata.Label || 'None',
+        liked: metadata.liked || false,
+      },
+      200,
+      { 'Cache-Control': 'public, max-age=3600' }
+    );
   } catch (error) {
     console.error('Error fetching file info:', error);
-    return new Response(JSON.stringify({ 
-      error: 'Internal server error',
-      message: error.message 
-    }), {
-      status: 500,
-      headers: { 
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
+    return jsonResponse(
+      {
+        error: 'Internal server error',
+        message: error.message,
+      },
+      500
+    );
   }
+}
+
+function jsonResponse(body, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      ...extraHeaders,
+    },
+  });
 }

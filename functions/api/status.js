@@ -7,6 +7,7 @@ import { createS3Client } from '../utils/s3client.js';
 import { checkDiscordConnection } from '../utils/discord.js';
 import { checkHuggingFaceConnection, hasHuggingFaceConfig } from '../utils/huggingface.js';
 import { getGuestConfig } from '../utils/guest.js';
+import { buildTelegramBotApiUrl, getTelegramApiBase } from '../utils/telegram.js';
 
 export async function onRequestGet(context) {
   const { env } = context;
@@ -28,16 +29,17 @@ export async function onRequestGet(context) {
   // 检查 Telegram 配置
   if (env.TG_Bot_Token && env.TG_Chat_ID) {
     checks.push(
-      fetch(`https://api.telegram.org/bot${env.TG_Bot_Token}/getMe`)
+      fetch(buildTelegramBotApiUrl(env, 'getMe'))
         .then(r => r.json())
         .then(data => {
           if (data.ok) {
             status.telegram = {
               connected: true,
               message: `已连接 - @${data.result.username}`,
-              botName: data.result.first_name,
-              botUsername: data.result.username
-            };
+	              botName: data.result.first_name,
+	              botUsername: data.result.username,
+	              apiBase: getTelegramApiBase(env)
+	            };
           } else {
             status.telegram = { connected: false, message: `连接失败: ${data.description}` };
           }

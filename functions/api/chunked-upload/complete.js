@@ -1,97 +1,97 @@
-/**
- * 完成分片上传
+﻿/**
+ * Complete chunked upload request.
  * POST /api/chunked-upload/complete
  */
 import { checkAuthentication, isAuthRequired } from '../../utils/auth.js';
 import { createS3Client } from '../../utils/s3client.js';
 import { uploadToDiscord } from '../../utils/discord.js';
 import { hasHuggingFaceConfig, uploadToHuggingFace } from '../../utils/huggingface.js';
+import {
+  buildTelegramBotApiUrl,
+  createSignedTelegramFileId,
+  getTelegramUploadMethodAndField,
+  pickTelegramFileId,
+  shouldUseSignedTelegramLinks,
+  shouldWriteTelegramMetadata,
+} from '../../utils/telegram.js';
+
+const TEMP_CHUNK_PREFIX = 'chunk-upload';
 
 export async function onRequestPost(context) {
   const { request, env } = context;
 
   try {
-    // 检查认证
     if (isAuthRequired(env)) {
       const auth = await checkAuthentication(context);
       if (!auth.authenticated) {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), { 
-          status: 401, 
-          headers: { 'Content-Type': 'application/json' } 
-        });
+        return jsonResponse({ error: 'Unauthorized' }, 401);
       }
     }
 
+    if (!env.img_url) {
+      return jsonResponse({ error: 'KV binding img_url is required for chunk upload task state.' }, 500);
+    }
+
     const body = await request.json();
-    const { uploadId } = body;
+    const { uploadId } = body || {};
 
     if (!uploadId) {
-      return new Response(JSON.stringify({ error: '缺少 uploadId' }), { 
-        status: 400, 
-        headers: { 'Content-Type': 'application/json' } 
-      });
+      return jsonResponse({ error: '缺少 uploadId' }, 400);
     }
 
-    // 获取上传任务
     const taskData = await env.img_url.get(`upload:${uploadId}`, { type: 'json' });
     if (!taskData) {
-      return new Response(JSON.stringify({ error: '上传任务不存在或已过期' }), { 
-        status: 404, 
-        headers: { 'Content-Type': 'application/json' } 
-      });
+      return jsonResponse({ error: '上传任务不存在或已过期' }, 404);
+    }
+    const totalChunks = Number(taskData.totalChunks || 0);
+    if (!Number.isFinite(totalChunks) || totalChunks <= 0) {
+      return jsonResponse({ error: 'Invalid totalChunks in upload task.' }, 400);
     }
 
-    // 检查所有分片是否都已上传
-    if (taskData.uploadedChunks.length !== taskData.totalChunks) {
-      return new Response(JSON.stringify({ 
-        error: '分片未完全上传',
-        uploaded: taskData.uploadedChunks.length,
-        total: taskData.totalChunks,
-        missingChunks: getMissingChunks(taskData.uploadedChunks, taskData.totalChunks)
-      }), { 
-        status: 400, 
-        headers: { 'Content-Type': 'application/json' } 
-      });
+    const chunkBackend = resolveChunkBackend(taskData, env);
+
+    if (!isKvWriteMinimized(env)) {
+      if (!Array.isArray(taskData.uploadedChunks) || taskData.uploadedChunks.length !== totalChunks) {
+        return jsonResponse(
+          {
+            error: '分片未完全上传',
+            uploaded: Array.isArray(taskData.uploadedChunks) ? taskData.uploadedChunks.length : 0,
+            total: totalChunks,
+            missingChunks: getMissingChunks(taskData.uploadedChunks || [], totalChunks),
+          },
+          400
+        );
+      }
     }
 
-    // 合并所有分片
     const chunks = [];
-    for (let i = 0; i < taskData.totalChunks; i++) {
-      const chunkData = await env.img_url.get(`chunk:${uploadId}:${i}`, { type: 'arrayBuffer' });
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkData = await readChunkData(uploadId, i, chunkBackend, env);
       if (!chunkData) {
-        return new Response(JSON.stringify({ error: `分片 ${i} 数据丢失` }), { 
-          status: 500, 
-          headers: { 'Content-Type': 'application/json' } 
-        });
+        return jsonResponse({ error: `分片 ${i} 数据缺失` }, 500);
       }
       chunks.push(chunkData);
     }
 
-    // 合并为完整文件
-    const completeFile = new Blob(chunks, { type: taskData.fileType });
-    const file = new File([completeFile], taskData.fileName, { type: taskData.fileType });
+    const completeFile = new Blob(chunks, { type: taskData.fileType || 'application/octet-stream' });
+    const file = new File([completeFile], taskData.fileName, { type: taskData.fileType || 'application/octet-stream' });
 
-    // 获取文件扩展名
-    const fileExtension = taskData.fileName.split('.').pop().toLowerCase();
-
-    let fileKey = null;
+    const fileExtension = getFileExtension(taskData.fileName);
     let storageType = taskData.storageMode || 'telegram';
+    let responseFileKey = null;
+    let metadataKey = null;
     let extraMetadata = {};
 
-    // 根据存储模式上传
     if (storageType === 'r2') {
       if (!env.R2_BUCKET) {
-        return new Response(JSON.stringify({ error: 'R2 未配置，无法完成上传' }), {
-          status: 500, headers: { 'Content-Type': 'application/json' }
-        });
+        return jsonResponse({ error: 'R2 未配置，无法完成上传' }, 500);
       }
       const uploadResult = await uploadToR2(file, fileExtension, env);
-      fileKey = uploadResult.fileKey;
+      responseFileKey = uploadResult.fileKey;
+      metadataKey = uploadResult.fileKey;
     } else if (storageType === 's3') {
       if (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY_ID) {
-        return new Response(JSON.stringify({ error: 'S3 未配置，无法完成上传' }), {
-          status: 500, headers: { 'Content-Type': 'application/json' }
-        });
+        return jsonResponse({ error: 'S3 未配置，无法完成上传' }, 500);
       }
       const s3 = createS3Client(env);
       const s3Id = `s3_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -99,25 +99,23 @@ export async function onRequestPost(context) {
       const arrayBuffer = await file.arrayBuffer();
       await s3.putObject(s3Key, arrayBuffer, {
         contentType: file.type || 'application/octet-stream',
-        metadata: { 'x-amz-meta-filename': taskData.fileName }
+        metadata: { 'x-amz-meta-filename': taskData.fileName },
       });
-      fileKey = `s3:${s3Key}`;
+      responseFileKey = `s3:${s3Key}`;
+      metadataKey = responseFileKey;
       extraMetadata.s3Key = s3Key;
     } else if (storageType === 'discord') {
       if (!env.DISCORD_WEBHOOK_URL && !env.DISCORD_BOT_TOKEN) {
-        return new Response(JSON.stringify({ error: 'Discord 未配置，无法完成上传' }), {
-          status: 500, headers: { 'Content-Type': 'application/json' }
-        });
+        return jsonResponse({ error: 'Discord 未配置，无法完成上传' }, 500);
       }
       const arrayBuffer = await file.arrayBuffer();
       const discordResult = await uploadToDiscord(arrayBuffer, taskData.fileName, taskData.fileType, env);
       if (!discordResult.success) {
-        return new Response(JSON.stringify({ error: 'Discord 上传失败: ' + discordResult.error }), {
-          status: 500, headers: { 'Content-Type': 'application/json' }
-        });
+        return jsonResponse({ error: 'Discord 上传失败: ' + discordResult.error }, 500);
       }
       const discordId = `discord_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      fileKey = `discord:${discordId}.${fileExtension}`;
+      responseFileKey = `discord:${discordId}.${fileExtension}`;
+      metadataKey = responseFileKey;
       extraMetadata.discordChannelId = discordResult.channelId;
       extraMetadata.discordMessageId = discordResult.messageId;
       extraMetadata.discordAttachmentId = discordResult.attachmentId;
@@ -125,142 +123,189 @@ export async function onRequestPost(context) {
       extraMetadata.discordSourceUrl = discordResult.sourceUrl;
     } else if (storageType === 'huggingface') {
       if (!hasHuggingFaceConfig(env)) {
-        return new Response(JSON.stringify({ error: 'HuggingFace 未配置，无法完成上传' }), {
-          status: 500, headers: { 'Content-Type': 'application/json' }
-        });
+        return jsonResponse({ error: 'HuggingFace 未配置，无法完成上传' }, 500);
       }
       const arrayBuffer = await file.arrayBuffer();
       const hfId = `hf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
       const hfPath = `uploads/${hfId}.${fileExtension}`;
       const hfResult = await uploadToHuggingFace(arrayBuffer, hfPath, taskData.fileName, env);
       if (!hfResult.success) {
-        return new Response(JSON.stringify({ error: 'HuggingFace 上传失败: ' + hfResult.error }), {
-          status: 500, headers: { 'Content-Type': 'application/json' }
-        });
+        return jsonResponse({ error: 'HuggingFace 上传失败: ' + hfResult.error }, 500);
       }
-      fileKey = `hf:${hfId}.${fileExtension}`;
+      responseFileKey = `hf:${hfId}.${fileExtension}`;
+      metadataKey = responseFileKey;
       extraMetadata.hfPath = hfPath;
     } else {
-      // 默认上传到 Telegram
       storageType = 'telegram';
       const result = await uploadToTelegram(file, env);
       if (!result.success) {
-        return new Response(JSON.stringify({ error: result.error }), {
-          status: 500, headers: { 'Content-Type': 'application/json' }
-        });
+        return jsonResponse({ error: result.error }, 500);
       }
-      fileKey = `${result.fileId}.${fileExtension}`;
+
+      metadataKey = `${result.fileId}.${fileExtension}`;
       taskData.telegramMessageId = result.messageId || taskData.telegramMessageId;
+
+      responseFileKey = await buildTelegramDirectId(
+        result.fileId,
+        fileExtension,
+        taskData.fileName,
+        taskData.fileType,
+        taskData.fileSize,
+        taskData.telegramMessageId,
+        env
+      );
+      extraMetadata.signedLink = shouldUseSignedTelegramLinks(env);
     }
 
-    // 保存文件信息到 KV
-    await env.img_url.put(fileKey, "", {
-      metadata: {
-        TimeStamp: Date.now(),
-        ListType: "None",
-        Label: "None",
-        liked: false,
-        fileName: taskData.fileName,
-        fileSize: taskData.fileSize,
-        chunked: true,
-        totalChunks: taskData.totalChunks,
-        storageType,
-        r2Key: storageType === 'r2' ? fileKey.replace(/^r2:/, '') : undefined,
-        telegramMessageId: storageType === 'telegram' ? taskData.telegramMessageId : undefined,
-        ...extraMetadata
-      }
-    });
+    const shouldWriteMetadata =
+      storageType === 'telegram' ? shouldWriteTelegramMetadata(env) : true;
 
-    // 清理临时数据
-    await cleanupUploadTask(uploadId, taskData.totalChunks, env);
+    if (shouldWriteMetadata && metadataKey) {
+      await env.img_url.put(metadataKey, '', {
+        metadata: {
+          TimeStamp: Date.now(),
+          ListType: 'None',
+          Label: 'None',
+          liked: false,
+          fileName: taskData.fileName,
+          fileSize: taskData.fileSize,
+          chunked: true,
+          totalChunks,
+          storageType,
+          r2Key: storageType === 'r2' ? metadataKey.replace(/^r2:/, '') : undefined,
+          telegramMessageId: storageType === 'telegram' ? taskData.telegramMessageId : undefined,
+          ...extraMetadata,
+        },
+      });
+    }
 
-    return new Response(JSON.stringify({
+    await cleanupUploadTask(uploadId, totalChunks, chunkBackend, env);
+
+    return jsonResponse({
       success: true,
-      src: `/file/${fileKey}`,
+      src: `/file/${responseFileKey}`,
       fileName: taskData.fileName,
-      fileSize: taskData.fileSize
-    }), {
-      headers: { 'Content-Type': 'application/json' }
+      fileSize: taskData.fileSize,
     });
-
   } catch (error) {
     console.error('Complete upload error:', error);
-    return new Response(JSON.stringify({ error: error.message }), { 
-      status: 500, 
-      headers: { 'Content-Type': 'application/json' } 
-    });
+    return jsonResponse({ error: error.message }, 500);
   }
 }
 
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 function getMissingChunks(uploaded, total) {
+  const uploadedSet = new Set(uploaded || []);
   const missing = [];
   for (let i = 0; i < total; i++) {
-    if (!uploaded.includes(i)) {
-      missing.push(i);
-    }
+    if (!uploadedSet.has(i)) missing.push(i);
   }
   return missing;
 }
 
-async function cleanupUploadTask(uploadId, totalChunks, env) {
+function isKvWriteMinimized(env) {
+  return env.MINIMIZE_KV_WRITES === 'true';
+}
+
+function resolveChunkBackend(taskData, env) {
+  if (taskData?.chunkBackend === 'r2' && env.R2_BUCKET) return 'r2';
+  if (taskData?.chunkBackend === 'kv') return 'kv';
+  return env.R2_BUCKET ? 'r2' : 'kv';
+}
+
+function getChunkObjectKey(uploadId, chunkIndex) {
+  return `${TEMP_CHUNK_PREFIX}/${uploadId}/${chunkIndex}`;
+}
+
+async function readChunkData(uploadId, chunkIndex, chunkBackend, env) {
+  if (chunkBackend === 'r2') {
+    if (!env.R2_BUCKET) return null;
+    const object = await env.R2_BUCKET.get(getChunkObjectKey(uploadId, chunkIndex));
+    if (!object) return null;
+    return await object.arrayBuffer();
+  }
+  return await env.img_url.get(`chunk:${uploadId}:${chunkIndex}`, { type: 'arrayBuffer' });
+}
+
+async function cleanupUploadTask(uploadId, totalChunks, chunkBackend, env) {
   try {
-    // 删除任务记录
-    await env.img_url.delete(`upload:${uploadId}`);
-    // 删除所有分片
-    for (let i = 0; i < totalChunks; i++) {
-      await env.img_url.delete(`chunk:${uploadId}:${i}`);
+    if (!isKvWriteMinimized(env)) {
+      await env.img_url.delete(`upload:${uploadId}`);
     }
-  } catch (e) {
-    console.error('Cleanup error:', e);
+
+    if (chunkBackend === 'r2' && env.R2_BUCKET) {
+      const toDelete = [];
+      for (let i = 0; i < totalChunks; i++) {
+        toDelete.push(env.R2_BUCKET.delete(getChunkObjectKey(uploadId, i)));
+      }
+      await Promise.allSettled(toDelete);
+      if (isKvWriteMinimized(env)) {
+        // Keep kv writes low in minimize mode, rely on TTL for upload task cleanup.
+        return;
+      }
+    }
+
+    if (chunkBackend === 'kv' && !isKvWriteMinimized(env)) {
+      for (let i = 0; i < totalChunks; i++) {
+        await env.img_url.delete(`chunk:${uploadId}:${i}`);
+      }
+    }
+  } catch (error) {
+    console.error('Cleanup error:', error);
   }
 }
 
 async function uploadToTelegram(file, env) {
   const formData = new FormData();
-  formData.append("chat_id", env.TG_Chat_ID);
+  formData.append('chat_id', env.TG_Chat_ID);
 
-  // 根据文件类型选择 API
-  let apiEndpoint;
-  if (file.type.startsWith('image/')) {
-    formData.append("photo", file);
-    apiEndpoint = 'sendPhoto';
-  } else if (file.type.startsWith('audio/')) {
-    formData.append("audio", file);
-    apiEndpoint = 'sendAudio';
-  } else if (file.type.startsWith('video/')) {
-    formData.append("video", file);
-    apiEndpoint = 'sendVideo';
-  } else {
-    formData.append("document", file);
-    apiEndpoint = 'sendDocument';
-  }
+  const { method: apiEndpoint, field } = getTelegramUploadMethodAndField(file.type);
+  formData.append(field, file);
 
   try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`,
-      { method: "POST", body: formData }
-    );
+    const response = await fetch(buildTelegramBotApiUrl(env, apiEndpoint), {
+      method: 'POST',
+      body: formData,
+    });
     const data = await response.json();
 
     if (!response.ok || !data.ok) {
-      // 如果是图片上传失败，尝试作为文档上传
-      if (apiEndpoint === 'sendPhoto') {
+      if (apiEndpoint === 'sendPhoto' || apiEndpoint === 'sendAudio') {
         const docFormData = new FormData();
-        docFormData.append("chat_id", env.TG_Chat_ID);
-        docFormData.append("document", file);
-        const docResponse = await fetch(
-          `https://api.telegram.org/bot${env.TG_Bot_Token}/sendDocument`,
-          { method: "POST", body: docFormData }
-        );
+        docFormData.append('chat_id', env.TG_Chat_ID);
+        docFormData.append('document', file);
+
+        const docResponse = await fetch(buildTelegramBotApiUrl(env, 'sendDocument'), {
+          method: 'POST',
+          body: docFormData,
+        });
         const docData = await docResponse.json();
         if (docResponse.ok && docData.ok) {
-          return { success: true, fileId: getFileId(docData), messageId: docData?.result?.message_id };
+          const fileId = pickTelegramFileId(docData);
+          if (!fileId) return { success: false, error: 'Failed to get Telegram file ID' };
+          return {
+            success: true,
+            fileId,
+            messageId: docData?.result?.message_id,
+          };
         }
       }
       return { success: false, error: data.description || 'Upload failed' };
     }
 
-    return { success: true, fileId: getFileId(data), messageId: data?.result?.message_id };
+    const fileId = pickTelegramFileId(data);
+    if (!fileId) return { success: false, error: 'Failed to get Telegram file ID' };
+    return {
+      success: true,
+      fileId,
+      messageId: data?.result?.message_id,
+    };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -273,29 +318,44 @@ async function uploadToR2(file, fileExtension, env) {
 
   await env.R2_BUCKET.put(objectKey, arrayBuffer, {
     httpMetadata: {
-      contentType: file.type || 'application/octet-stream'
+      contentType: file.type || 'application/octet-stream',
     },
     customMetadata: {
       fileName: file.name,
-      uploadTime: Date.now().toString()
-    }
+      uploadTime: Date.now().toString(),
+    },
   });
 
   return { fileKey: `r2:${objectKey}` };
 }
 
-function getFileId(response) {
-  if (!response.ok || !response.result) return null;
-  const result = response.result;
-  
-  if (result.photo) {
-    return result.photo.reduce((prev, current) =>
-      (prev.file_size > current.file_size) ? prev : current
-    ).file_id;
+function getFileExtension(fileName) {
+  const ext = String(fileName || '').split('.').pop()?.toLowerCase();
+  if (!ext || ext === String(fileName || '').toLowerCase()) return 'bin';
+  return ext.replace(/[^a-z0-9]/g, '') || 'bin';
+}
+
+async function buildTelegramDirectId(
+  fileId,
+  fileExtension,
+  fileName,
+  mimeType,
+  fileSize,
+  messageId,
+  env
+) {
+  if (!shouldUseSignedTelegramLinks(env)) {
+    return `${fileId}.${fileExtension}`;
   }
-  if (result.document) return result.document.file_id;
-  if (result.video) return result.video.file_id;
-  if (result.audio) return result.audio.file_id;
-  
-  return null;
+  return await createSignedTelegramFileId(
+    {
+      fileId,
+      fileExtension,
+      fileName,
+      mimeType,
+      fileSize,
+      messageId,
+    },
+    env
+  );
 }
