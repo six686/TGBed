@@ -476,6 +476,54 @@ textarea {
   background: #ffffff;
 }
 
+.target-directory {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.target-directory-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.target-directory-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.target-directory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.target-directory-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.target-directory-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(248, 250, 252, 0.95), rgba(241, 245, 249, 0.9));
+}
+
+.queue-target {
+  margin: 6px 0 0;
+}
+
 .storage-panel {
   display: grid;
   gap: 14px;
@@ -870,6 +918,15 @@ textarea {
   }
 
   .url-row {
+    grid-template-columns: 1fr;
+  }
+
+  .target-directory-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .target-directory-grid {
     grid-template-columns: 1fr;
   }
 
